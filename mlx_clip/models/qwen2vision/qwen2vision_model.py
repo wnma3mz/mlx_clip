@@ -173,7 +173,7 @@ class VisionSdpaAttention(nn.Module):
     def __call__(
         self,
         hidden_states: mx.array,
-        cu_seqlens: List[int],
+        attention_mask: mx.array,
         rotary_pos_emb: mx.array = None,
     ) -> mx.array:
         seq_length = hidden_states.shape[0]
@@ -181,11 +181,6 @@ class VisionSdpaAttention(nn.Module):
         q = apply_rotary_pos_emb_vision(mx.expand_dims(q, axis=0), rotary_pos_emb)[0]
         k = apply_rotary_pos_emb_vision(mx.expand_dims(k, axis=0), rotary_pos_emb)[0]
 
-        attention_mask = mx.zeros(shape=(1, seq_length, seq_length), dtype=mx.bool_)
-        for i in range(1, len(cu_seqlens)):
-            l, r = cu_seqlens[i - 1], cu_seqlens[i]
-            attention_mask[..., l:r, l:r] = True
-        attention_mask = mx.where(attention_mask, 0, -math.inf).astype(hidden_states.dtype)
         q = q.transpose(1, 0, 2)
         k = k.transpose(1, 0, 2)
         v = v.transpose(1, 0, 2)
@@ -215,10 +210,10 @@ class Qwen2VLVisionBlock(nn.Module):
             hidden_act=config.hidden_act,
         )
 
-    def __call__(self, hidden_states, cu_seqlens, rotary_pos_emb) -> mx.array:
+    def __call__(self, hidden_states, attention_mask, rotary_pos_emb) -> mx.array:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
-            cu_seqlens=cu_seqlens,
+            attention_mask=attention_mask,
             rotary_pos_emb=rotary_pos_emb,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
@@ -277,6 +272,13 @@ class Qwen2VisionModel(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
+    def _create_attention_mask(self, seq_length: int, cu_seqlens: List[int]) -> mx.array:
+        attention_mask = mx.zeros(shape=(1, seq_length, seq_length), dtype=mx.bool_)
+        for i in range(1, len(cu_seqlens)):
+            l, r = cu_seqlens[i - 1], cu_seqlens[i]
+            attention_mask[..., l:r, l:r] = True
+        return mx.where(attention_mask, 0, -math.inf)        
+
     def __call__(self, hidden_states: mx.array, grid_thw: mx.array) -> mx.array:
         hidden_states = self.patch_embed(hidden_states)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
@@ -284,8 +286,10 @@ class Qwen2VisionModel(nn.Module):
         repeated = mx.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
         cu_seqlens = mx.cumsum(repeated)
         cu_seqlens = mx.pad(cu_seqlens, pad_width=(1, 0)).tolist()
+
+        attention_mask = self._create_attention_mask(hidden_states.shape[0], cu_seqlens).astype(hidden_states.dtype)
         for blk in self.blocks:
-            hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+            hidden_states = blk(hidden_states, attention_mask=attention_mask, rotary_pos_emb=rotary_pos_emb)
         return self.merger(hidden_states)
 
     @property
