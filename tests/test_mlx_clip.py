@@ -10,9 +10,9 @@ from PIL import Image
 
 from mlx_clip import mlx_clip
 from mlx_clip.convert import convert_weights
-from mlx_clip.image_processor import CLIPImageProcessor
-from mlx_clip.model import CLIPModel
-from mlx_clip.tokenizer import CLIPTokenizer
+from mlx_clip.models.clip.clip_image_processor import CLIPImageProcessor
+from mlx_clip.models.clip.clip_model import CLIPModel
+from mlx_clip.models.clip.clip_tokenizer import CLIPTokenizer
 import mlx.core as mx
 
 # Helpers

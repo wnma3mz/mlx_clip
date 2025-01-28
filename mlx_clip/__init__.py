@@ -2,9 +2,9 @@ import logging
 from PIL import Image
 from typing import Tuple
 from pathlib import Path
-from .image_processor import CLIPImageProcessor
-from .model import CLIPModel
-from .tokenizer import CLIPTokenizer
+from .models.clip.clip_image_processor import CLIPImageProcessor
+from .models.clip.clip_model import CLIPModel
+from .models.clip.clip_tokenizer import CLIPTokenizer
 from .convert import convert_weights
 
 class mlx_clip:
