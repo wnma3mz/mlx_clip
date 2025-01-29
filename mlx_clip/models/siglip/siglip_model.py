@@ -6,7 +6,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -39,36 +39,6 @@ class SiglipVisionConfig:
             patch_size=data_dict.get("patch_size", 16),
             layer_norm_eps=data_dict.get("layer_norm_eps", 1e-6),
         )
-
-        # "image_size": 384,
-        # "patch_size": 16,
-        # "width": 1024,
-        # "layers": 24,
-        # "heads": 16,
-        # "mlp_ratio": 4,
-        # "global_pool": "map",
-
-        # SiglipVisionConfig {
-        # "attention_dropout": 0.0,
-        # "hidden_act": "gelu_pytorch_tanh",
-        # "hidden_size": 768,
-        # "image_size": 224,
-        # "intermediate_size": 3072,
-        # "layer_norm_eps": 1e-06,
-        # "model_type": "siglip_vision_model",
-        # "num_attention_heads": 12,
-        # "num_channels": 3,
-        # "num_hidden_layers": 12,
-        # "patch_size": 16,
-        # "transformers_version": "4.46.0"
-        # }
-
-
-def quick_gelu(x: mx.array) -> mx.array:
-    """
-    A fast GELU approximation https://github.com/hendrycks/GELUs
-    """
-    return x * mx.sigmoid(1.702 * x)
 
 
 # Modify from CLIP
@@ -128,7 +98,7 @@ class MLP(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.config = config
-        self.activation_fn = quick_gelu
+        self.activation_fn = nn.GELU()
         self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
         self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
 
@@ -150,12 +120,9 @@ class EncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def __call__(self, x: mx.array, mask: Optional[mx.array] = None) -> mx.array:
-        y = self.layer_norm1(x)
-        y = self.self_attn(y, mask)
-        x = x + y
-        y = self.layer_norm2(x)
-        y = self.mlp(y)
-        return x + y
+        x = x + self.self_attn(self.layer_norm1(x), mask)
+        x = x + self.mlp(self.layer_norm2(x))
+        return x
 
 
 # Copied from CLIP
@@ -188,11 +155,9 @@ class SiglipVisionEmbeddings(nn.Module):
         target_dtype = self.patch_embedding.weight.dtype
         # shape = [*, width, grid, grid]
         patch_embeds = self.patch_embedding(pixel_values.astype(target_dtype))
-        print("patch_embeds", patch_embeds.shape)
         # patch_embeds (1, 14, 14, 1024)
         # [batch_size, h, w, embed_dim]
         embeddings = mx.flatten(patch_embeds, start_axis=1, end_axis=2)
-        print("embedding", embeddings.shape)
         # embeddings = patch_embeds.flatten(2).transpose(1, 2)  # BCHW -> BNC
         return embeddings
 
@@ -203,7 +168,6 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
 
-        print("config.hidden_size", config.hidden_size)
         self.q = nn.Linear(config.hidden_size, config.hidden_size)
         self.kv = nn.Linear(config.hidden_size, 2 * config.hidden_size)
         self.proj = nn.Linear(config.hidden_size, config.hidden_size)
@@ -238,12 +202,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         # q, k = self.q_norm(q), self.k_norm(k)
 
         # self attn
-        x = mx.fast.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            scale=self.scale,
-        )
+        x = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
 
         x = x.transpose(0, 2, 1, 3).reshape(B, self.latent_len, C)
         x = self.proj(x)
@@ -277,8 +236,9 @@ class SiglipVisionModel(nn.Module):
         self.pos_embed = mx.zeros((1, grid_size * grid_size, config.hidden_size))
 
         self.head = None
+        # attn_pool
         if config.use_head:
-            self.head = SiglipMultiheadAttentionPoolingHead(config)  # attn_pool
+            self.head = SiglipMultiheadAttentionPoolingHead(config)
 
     def _pos_embed(self, x: mx.array) -> mx.array:
         return x + self.pos_embed
@@ -335,6 +295,7 @@ class SiglipVisionModel(nn.Module):
     @staticmethod
     def sanitize(weights):
         sanitized_weights = {}
+        # Ugly compatibility janus
         for k, v in weights.items():
             k = k.split("vision_tower.", 1)[-1]
             if "blocks." in k:
@@ -369,7 +330,11 @@ class SiglipVisionModel(nn.Module):
 if __name__ == "__main__":
     model = SiglipVisionModel.from_pretrained("siglip_model")
 
-    shape = (11640, 1176)
     shape = (1, 384, 384, 3)
     pixel_value = mx.random.normal(shape=shape)
-    model(pixel_value)
+    # import torch
+    # pixel_value_torch = torch.load("x.pth")
+    # pixel_value = mx.array(pixel_value_torch).transpose(0, 2, 3, 1)
+
+    output = model(pixel_value)
+    # print("output", output, output.shape)
