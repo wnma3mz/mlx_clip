@@ -136,7 +136,7 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config: CLIPTextConfig):
+    def __init__(self, config: Union[CLIPTextConfig, CLIPVisionConfig]):
         super().__init__()
         self.config = config
         self.activation_fn = quick_gelu
@@ -152,7 +152,7 @@ class MLP(nn.Module):
 class EncoderLayer(nn.Module):
     """The transformer encoder layer from CLIP."""
 
-    def __init__(self, config: CLIPTextConfig):
+    def __init__(self, config: Union[CLIPTextConfig, CLIPVisionConfig]):
         super().__init__()
         self.embed_dim = config.hidden_size
         # Add biases to the attention projections
@@ -189,7 +189,7 @@ class TextEmbeddings(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, config: CLIPTextConfig):
+    def __init__(self, config: Union[CLIPTextConfig, CLIPVisionConfig]):
         self.layers = [EncoderLayer(config) for _ in range(config.num_hidden_layers)]
 
 

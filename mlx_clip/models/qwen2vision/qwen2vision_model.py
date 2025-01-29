@@ -57,7 +57,7 @@ class VisionEmbeddings(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         batch_size = x.shape[0]
-        # Patchify using conv:
+        # Patch using conv:
         # [batch_size, sqrt(num_patches), sqrt(num_patches), embed_dim]
         patch_embeddings = self.patch_embedding(x)
         # [batch_size, num_patches, embed_dim]
