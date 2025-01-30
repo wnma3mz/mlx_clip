@@ -1,17 +1,22 @@
 # coding: utf-8
 import math
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 
 
+# "fullatt_block_indexes": [
+#   7,
+#   15,
+#   23,
+#   31
+# ],
 @dataclass
-class Qwen2VisionConfig:
+class Qwen2_5VisionConfig:
     depth: int
     embed_dim: int
-    mlp_ratio: int
     num_heads: int
     in_channels: int
     hidden_size: int
@@ -20,7 +25,14 @@ class Qwen2VisionConfig:
     spatial_merge_size: int
     spatial_patch_size: int
     temporal_patch_size: int
+    window_size: int
     hidden_act: str = "silu"
+    mlp_ratio: int = 4
+    intermediate_size: Optional[int] = None
+
+    def __post_init__(self):
+        if self.intermediate_size is None:
+            self.intermediate_size = self.embed_dim * self.mlp_ratio
 
 
 class VisionRotaryEmbedding(nn.Module):
@@ -112,10 +124,10 @@ class PatchEmbed(nn.Module):
 
 
 class PatchMerger(nn.Module):
-    def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
+    def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2, norm_bias: bool = False) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
-        self.ln_q = nn.LayerNorm(context_dim, eps=1e-6)
+        self.ln_q = nn.LayerNorm(context_dim, eps=1e-6, bias=norm_bias)
         self.mlp = [
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.GELU(),
@@ -133,16 +145,18 @@ def QuickGELUActivation(input: mx.array) -> mx.array:
     return input * mx.sigmoid(1.702 * input)
 
 
-class VisionMlp(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int, hidden_act: str) -> None:
+class Qwen2_5_VLMLP(nn.Module):
+    def __init__(self, config, bias: bool = True):
         super().__init__()
-        self.fc1 = nn.Linear(dim, hidden_dim)
-        # self.act = nn.SiLU()
-        self.act = QuickGELUActivation  # for qwenvl
-        self.fc2 = nn.Linear(hidden_dim, dim)
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
+        self.act_fn = QuickGELUActivation  # ACT2FN[config.hidden_act]
 
-    def __call__(self, x) -> mx.array:
-        return self.fc2(self.act(self.fc1(x)))
+    def __call__(self, hidden_state):
+        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
 
 def rotate_half(x):
@@ -157,16 +171,9 @@ def apply_rotary_pos_emb_vision(tensor: mx.array, freqs: mx.array) -> mx.array:
     # tensor = tensor.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    # before cos (1824, 40)
-    # print("before cos", cos.shape)
     cos = mx.expand_dims(mx.tile(mx.expand_dims(cos, axis=1), (1, 1, 2)), axis=0)
     sin = mx.expand_dims(mx.tile(mx.expand_dims(sin, axis=1), (1, 1, 2)), axis=0)
 
-    # print("tensor", tensor.shape)
-    # print("cos", cos.shape)
-    # tensor (1, 1824, 16, 80)
-    # cos (1, 1824, 1, 80)
-    # assert False
     output = (tensor * cos) + (rotate_half(tensor) * sin)
     output = output.astype(orig_dtype)
     return output
@@ -205,19 +212,14 @@ class VisionSdpaAttention(nn.Module):
         return attn_output
 
 
-class Qwen2VLVisionBlock(nn.Module):
-    def __init__(self, config: Qwen2VisionConfig) -> None:
+class Qwen2_5VLVisionBlock(nn.Module):
+    def __init__(self, config: Qwen2_5VisionConfig) -> None:
         super().__init__()
-        self.norm1 = nn.LayerNorm(config.embed_dim, eps=1e-6)
-        self.norm2 = nn.LayerNorm(config.embed_dim, eps=1e-6)
-        mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
+        self.norm1 = nn.LayerNorm(config.hidden_size, eps=1e-6, bias=False)
+        self.norm2 = nn.LayerNorm(config.hidden_size, eps=1e-6, bias=False)
 
-        self.attn = VisionSdpaAttention(config.embed_dim, num_heads=config.num_heads)
-        self.mlp = VisionMlp(
-            dim=config.embed_dim,
-            hidden_dim=mlp_hidden_dim,
-            hidden_act=config.hidden_act,
-        )
+        self.attn = VisionSdpaAttention(config.hidden_size, num_heads=config.num_heads)
+        self.mlp = Qwen2_5_VLMLP(config)
 
     def __call__(self, hidden_states, attention_mask, rotary_pos_emb) -> mx.array:
         hidden_states = hidden_states + self.attn(
@@ -229,25 +231,29 @@ class Qwen2VLVisionBlock(nn.Module):
         return hidden_states
 
 
-class Qwen2VisionModel(nn.Module):
-    def __init__(self, config: Qwen2VisionConfig) -> None:
+class Qwen2_5VisionModel(nn.Module):
+    def __init__(self, config: Qwen2_5VisionConfig) -> None:
         super().__init__()
         self.spatial_merge_size = config.spatial_merge_size
+        self.window_size = config.window_size
+        self.patch_size = config.patch_size
+        self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
 
         self.patch_embed = PatchEmbed(
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
             in_channels=config.in_channels,
-            embed_dim=config.embed_dim,
+            embed_dim=config.hidden_size,
         )
 
-        head_dim = config.embed_dim // config.num_heads
+        head_dim = config.hidden_size // config.num_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
-        self.blocks = [Qwen2VLVisionBlock(config) for _ in range(config.depth)]
+        self.blocks = [Qwen2_5VLVisionBlock(config) for _ in range(config.depth)]
         self.merger = PatchMerger(
-            dim=config.hidden_size,
-            context_dim=config.embed_dim,
+            dim=config.embed_dim,
+            context_dim=config.hidden_size,
             spatial_merge_size=config.spatial_merge_size,
+            norm_bias=False,
         )
 
     def rot_pos_emb(self, grid_thw):
@@ -278,10 +284,59 @@ class Qwen2VisionModel(nn.Module):
         pos_ids = mx.concatenate(pos_ids, axis=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        print("rotary_pos_emb_full", rotary_pos_emb_full.shape)  # (76, 20)
-        assert False
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
+
+    def get_window_index(self, grid_thw):
+        window_index: list = []
+        cu_window_seqlens: list = [0]
+        window_index_id = 0
+        vit_merger_window_size = self.window_size // self.spatial_merge_size // self.patch_size
+
+        for thw in grid_thw:
+            grid_t, grid_h, grid_w = thw.tolist()
+            llm_grid_h, llm_grid_w = (
+                grid_h // self.spatial_merge_size,
+                grid_w // self.spatial_merge_size,
+            )
+            # index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(grid_t, llm_grid_h, llm_grid_w)
+            index = mx.arange(grid_t * llm_grid_h * llm_grid_w).reshape(grid_t, llm_grid_h, llm_grid_w)
+
+            pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+            pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
+            num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
+            num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+
+            # index_padded = F.pad(index, (0, pad_w, 0, pad_h), "constant", -100)
+            index_padded = mx.pad(index, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=-100)
+            index_padded = index_padded.reshape(
+                grid_t,
+                num_windows_h,
+                vit_merger_window_size,
+                num_windows_w,
+                vit_merger_window_size,
+            )
+            index_padded = index_padded.transpose(0, 1, 3, 2, 4).reshape(
+                grid_t,
+                num_windows_h * num_windows_w,
+                vit_merger_window_size,
+                vit_merger_window_size,
+            )
+            # seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
+            seqlens = mx.sum(index_padded != -100, axis=(2, 3)).reshape(-1)
+
+            index_padded = index_padded.reshape(-1)
+
+            # index_new = index_padded[index_padded != -100]
+            index_new = mx.array([x for x in index_padded.flatten() if x != -100])
+
+            window_index.append(index_new + window_index_id)
+            cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit + cu_window_seqlens[-1]
+            cu_window_seqlens.extend(cu_seqlens_tmp.tolist())
+            window_index_id += grid_t * llm_grid_h * llm_grid_w
+        window_index = mx.concat(window_index, axis=0)
+
+        return window_index, cu_window_seqlens
 
     def _create_attention_mask(self, seq_length: int, cu_seqlens: List[int]) -> mx.array:
         attention_mask = mx.zeros(shape=(1, seq_length, seq_length), dtype=mx.bool_)
@@ -292,12 +347,18 @@ class Qwen2VisionModel(nn.Module):
 
     def __call__(self, hidden_states: mx.array, grid_thw: mx.array) -> mx.array:
         hidden_states = self.patch_embed(hidden_states)
-        # before grid_thw array([[1, 24, 76]], dtype=int64)
-        # rotary_pos_emb (1824, 40)
-        print("before grid_thw", grid_thw)
+        seq_len, _ = hidden_states.shape
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        # TODO: cu_window_seqlens could be speed up
+        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
 
-        print("rotary_pos_emb", rotary_pos_emb.shape)
+        hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
+
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
 
         repeated = mx.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
         cu_seqlens = mx.cumsum(repeated)
