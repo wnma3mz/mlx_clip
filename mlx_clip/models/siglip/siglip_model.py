@@ -26,6 +26,7 @@ class SiglipVisionConfig:
     layer_norm_eps: float
     use_head: bool = True
     mlp_ratio: int = 4
+    ignore_head: bool = True
 
     @classmethod
     def from_dict(cls, data_dict: Dict):
@@ -219,8 +220,6 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
 
 
 class SiglipVisionModel(nn.Module):
-    """Implements the vision encoder transformer from CLIP."""
-
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.embeddings = SiglipVisionEmbeddings(config)  # patch_embed
@@ -236,8 +235,9 @@ class SiglipVisionModel(nn.Module):
         self.pos_embed = mx.zeros((1, grid_size * grid_size, config.hidden_size))
 
         self.head = None
+        self.ignore_head = config.ignore_head
         # attn_pool
-        if config.use_head:
+        if not self.ignore_head:
             self.head = SiglipMultiheadAttentionPoolingHead(config)
 
     def _pos_embed(self, x: mx.array) -> mx.array:
@@ -251,7 +251,7 @@ class SiglipVisionModel(nn.Module):
         x = self.encoder(x, mask)
         x = self.norm(x)
 
-        return x if self.head is None else self.head(x)
+        return x if self.ignore_head else self.head(x)
 
     @staticmethod
     def _load_default_config(config_data):
