@@ -16,7 +16,7 @@ import mlx.nn as nn
 @dataclass
 class Qwen2_5VisionConfig:
     depth: int
-    embed_dim: int
+    out_hidden_size: int
     num_heads: int
     in_channels: int
     hidden_size: int
@@ -32,7 +32,7 @@ class Qwen2_5VisionConfig:
 
     def __post_init__(self):
         if self.intermediate_size is None:
-            self.intermediate_size = self.embed_dim * self.mlp_ratio
+            self.intermediate_size = self.out_hidden_size * self.mlp_ratio
 
 
 class VisionRotaryEmbedding(nn.Module):
@@ -50,7 +50,7 @@ class VisionEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.embed_dim = config.hidden_size
+        self.out_hidden_size = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
@@ -58,7 +58,7 @@ class VisionEmbeddings(nn.Module):
 
         self.patch_embedding = nn.Conv2d(
             in_channels=config.num_channels,
-            out_channels=self.embed_dim,
+            out_channels=self.out_hidden_size,
             kernel_size=self.patch_size,
             stride=self.patch_size,
             bias=False,
@@ -66,20 +66,20 @@ class VisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches + 1
-        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+        self.position_embedding = nn.Embedding(self.num_positions, self.out_hidden_size)
 
     def __call__(self, x: mx.array) -> mx.array:
         batch_size = x.shape[0]
         # Patch using conv:
-        # [batch_size, sqrt(num_patches), sqrt(num_patches), embed_dim]
+        # [batch_size, sqrt(num_patches), sqrt(num_patches), out_hidden_size]
         patch_embeddings = self.patch_embedding(x)
-        # [batch_size, num_patches, embed_dim]
+        # [batch_size, num_patches, out_hidden_size]
         patch_embeddings = mx.flatten(patch_embeddings, start_axis=1, end_axis=2)
-        embed_dim = patch_embeddings.shape[-1]
+        out_hidden_size = patch_embeddings.shape[-1]
         # Prepend <CLS> embeddings
-        # [batch_size, 1, embed_dim]
-        cls_embeddings = mx.broadcast_to(self.class_embedding, (batch_size, 1, embed_dim))
-        # [batch_size, num_patches + 1, embed_dim]
+        # [batch_size, 1, out_hidden_size]
+        cls_embeddings = mx.broadcast_to(self.class_embedding, (batch_size, 1, out_hidden_size))
+        # [batch_size, num_patches + 1, out_hidden_size]
         embeddings = mx.concatenate((cls_embeddings, patch_embeddings), axis=1)
         # Add positional encoding
         embeddings += self.position_embedding.weight
@@ -92,18 +92,18 @@ class PatchEmbed(nn.Module):
         patch_size: int = 14,
         temporal_patch_size: int = 2,
         in_channels: int = 3,
-        embed_dim: int = 1152,
+        out_hidden_size: int = 1152,
     ) -> None:
         super().__init__()
         self.patch_size = patch_size
         self.temporal_patch_size = temporal_patch_size
         self.in_channels = in_channels
-        self.embed_dim = embed_dim
+        self.out_hidden_size = out_hidden_size
 
         kernel_size = [temporal_patch_size, patch_size, patch_size]
         self.proj = nn.Conv3d(
             in_channels=in_channels,
-            out_channels=embed_dim,
+            out_channels=out_hidden_size,
             kernel_size=kernel_size,
             stride=kernel_size,
             bias=False,
@@ -119,7 +119,7 @@ class PatchEmbed(nn.Module):
         )
         # [out_ch, in_ch, n, h, w] -> [out_ch, n, h, w, in_ch]
         hidden_states = mx.transpose(hidden_states, (0, 2, 3, 4, 1))
-        hidden_states = self.proj(hidden_states).reshape(-1, self.embed_dim)
+        hidden_states = self.proj(hidden_states).reshape(-1, self.out_hidden_size)
         return hidden_states
 
 
@@ -243,14 +243,14 @@ class Qwen2_5VisionModel(nn.Module):
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
             in_channels=config.in_channels,
-            embed_dim=config.hidden_size,
+            out_hidden_size=config.hidden_size,
         )
 
         head_dim = config.hidden_size // config.num_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
         self.blocks = [Qwen2_5VLVisionBlock(config) for _ in range(config.depth)]
         self.merger = PatchMerger(
-            dim=config.embed_dim,
+            dim=config.out_hidden_size,
             context_dim=config.hidden_size,
             spatial_merge_size=config.spatial_merge_size,
             norm_bias=False,
