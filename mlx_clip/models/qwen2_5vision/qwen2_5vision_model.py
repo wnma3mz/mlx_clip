@@ -282,8 +282,8 @@ class Qwen2_5VisionModel(nn.Module):
             wpos_ids = wpos_ids.flatten()
             pos_ids.append(mx.repeat(mx.stack([hpos_ids, wpos_ids], axis=-1), t, axis=1))
         pos_ids = mx.concatenate(pos_ids, axis=0)
-        max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        max_grid_size = mx.max(grid_thw[:, 1:])
+        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size.tolist())
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 

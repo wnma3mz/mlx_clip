@@ -157,16 +157,9 @@ def apply_rotary_pos_emb_vision(tensor: mx.array, freqs: mx.array) -> mx.array:
     # tensor = tensor.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    # before cos (1824, 40)
-    # print("before cos", cos.shape)
     cos = mx.expand_dims(mx.tile(mx.expand_dims(cos, axis=1), (1, 1, 2)), axis=0)
     sin = mx.expand_dims(mx.tile(mx.expand_dims(sin, axis=1), (1, 1, 2)), axis=0)
 
-    # print("tensor", tensor.shape)
-    # print("cos", cos.shape)
-    # tensor (1, 1824, 16, 80)
-    # cos (1, 1824, 1, 80)
-    # assert False
     output = (tensor * cos) + (rotate_half(tensor) * sin)
     output = output.astype(orig_dtype)
     return output
@@ -276,10 +269,8 @@ class Qwen2VisionModel(nn.Module):
             wpos_ids = wpos_ids.flatten()
             pos_ids.append(mx.repeat(mx.stack([hpos_ids, wpos_ids], axis=-1), t, axis=1))
         pos_ids = mx.concatenate(pos_ids, axis=0)
-        max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        print("rotary_pos_emb_full", rotary_pos_emb_full.shape)  # (76, 20)
-        assert False
+        max_grid_size = mx.max(grid_thw[:, 1:])
+        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size.tolist())
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
@@ -292,12 +283,8 @@ class Qwen2VisionModel(nn.Module):
 
     def __call__(self, hidden_states: mx.array, grid_thw: mx.array) -> mx.array:
         hidden_states = self.patch_embed(hidden_states)
-        # before grid_thw array([[1, 24, 76]], dtype=int64)
-        # rotary_pos_emb (1824, 40)
-        print("before grid_thw", grid_thw)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        print("rotary_pos_emb", rotary_pos_emb.shape)
 
         repeated = mx.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
         cu_seqlens = mx.cumsum(repeated)
