@@ -20,7 +20,6 @@ class Qwen2VisionConfig:
     spatial_merge_size: int
     spatial_patch_size: int
     temporal_patch_size: int
-    hidden_act: str = "silu"
 
 
 class VisionRotaryEmbedding(nn.Module):
@@ -134,7 +133,7 @@ def QuickGELUActivation(input: mx.array) -> mx.array:
 
 
 class VisionMlp(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int, hidden_act: str) -> None:
+    def __init__(self, dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.fc1 = nn.Linear(dim, hidden_dim)
         # self.act = nn.SiLU()
@@ -209,7 +208,6 @@ class Qwen2VLVisionBlock(nn.Module):
         self.mlp = VisionMlp(
             dim=config.embed_dim,
             hidden_dim=mlp_hidden_dim,
-            hidden_act=config.hidden_act,
         )
 
     def __call__(self, hidden_states, attention_mask, rotary_pos_emb) -> mx.array:
@@ -284,7 +282,6 @@ class Qwen2VisionModel(nn.Module):
     def __call__(self, hidden_states: mx.array, grid_thw: mx.array) -> mx.array:
         hidden_states = self.patch_embed(hidden_states)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
 
         repeated = mx.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
         cu_seqlens = mx.cumsum(repeated)
